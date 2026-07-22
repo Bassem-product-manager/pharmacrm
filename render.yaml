@@ -1,0 +1,33 @@
+# Render Blueprint — free Docker web service for the PharmaCRM API.
+# All secret values are sync:false → you paste them in the Render dashboard;
+# nothing sensitive lives in the repo. Free tier sleeps after 15 min idle
+# (a GitHub Actions cron keeps it warm — see .github/workflows/keepalive.yml).
+services:
+  - type: web
+    name: pharmacrm-api
+    runtime: docker
+    plan: free
+    region: frankfurt # closest free region to Egypt
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: . # repo root = turborepo workspace root
+    healthCheckPath: /health # excluded from the /api/v1 prefix in main.ts
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JOBS_DISABLED
+        value: "0" # BullMQ workers ON (reminders/campaigns run)
+      # ---- paste these in Render (Environment tab) ----
+      - key: POSTGRES_URL # Neon connection string (pooled), ?sslmode=require
+        sync: false
+      - key: REDIS_URL # Upstash rediss:// URL (TLS)
+        sync: false
+      - key: JWT_SECRET # openssl rand -hex 32
+        sync: false
+      - key: JWT_REFRESH_SECRET # a DIFFERENT openssl rand -hex 32
+        sync: false
+      - key: WEB_ORIGIN # https://<your-web>.vercel.app (set after Vercel deploy)
+        sync: false
+      - key: ADMIN_ORIGIN # https://<your-admin>.vercel.app (set after Vercel deploy)
+        sync: false
+      # WA_TOKEN / SMS_API_KEY intentionally UNSET → MockProvider stays active.

@@ -1,0 +1,340 @@
+// PharmaCRM schema — exact copy of docs/04-database.md §2 (v1.1, AUTHORITATIVE)
+// Do not add, remove, or rename fields without updating docs/04 first.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("POSTGRES_URL")
+}
+
+// ---------- TENANT ----------
+model Pharmacy {
+  id                 String   @id @default(cuid())
+  name               String
+  phone              String
+  city               String?
+  address            String? // printed on tax invoices
+  taxId              String? // البطاقة الضريبية — printed on tax invoices
+  vatRate            Decimal  @default(14) @db.Decimal(5, 2) // % — sale prices are VAT-inclusive; 0 for exempt goods
+  invoiceSeq         Int      @default(0) // last issued invoice number (assigned at issuance under FOR UPDATE)
+  loyaltyRatio       Decimal  @default(0.1) @db.Decimal(6, 4) // points per 1 EGP
+  redeemRate         Decimal  @default(0.25) @db.Decimal(6, 4) // EGP per 1 point
+  smsFallback        Boolean  @default(true)
+  smsSenderName      String?
+  waPhoneId          String?
+  plan               Plan     @default(FREE)
+  blockedAt          DateTime? // super-admin restriction — blocked pharmacies can't log in / refresh
+  monthlyReminderCap Int      @default(100) // R1
+  quietStart         Int      @default(9) // R2, Africa/Cairo hours
+  quietEnd           Int      @default(21)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  users     User[]
+  customers Customer[]
+  sales     Sale[]
+  campaigns Campaign[]
+  products  ProductRef[]
+  messages  Message[]
+  auditLogs AuditLog[]
+}
+
+enum Plan {
+  FREE
+  PRO
+}
+
+model User {
+  id           String   @id @default(cuid())
+  pharmacyId   String
+  pharmacy     Pharmacy @relation(fields: [pharmacyId], references: [id])
+  name         String
+  phone        String   @unique // login id, E.164
+  passwordHash String
+  role         Role     @default(STAFF)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  salesLogged Sale[]
+
+  @@index([pharmacyId])
+}
+
+enum Role {
+  OWNER
+  STAFF
+}
+
+// Internal admin — completely outside tenant model (docs/06 §2)
+model AdminUser {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+}
+
+// ---------- CRM CORE ----------
+model Customer {
+  id            String    @id @default(cuid())
+  pharmacyId    String
+  pharmacy      Pharmacy  @relation(fields: [pharmacyId], references: [id])
+  name          String
+  phone         String // E.164 +20…
+  gender        Gender?
+  birthYear     Int?
+  tags          Tag[] // CHRONIC, VIP only (R8: INACTIVE computed)
+  consentAt     DateTime? // Law 151/2020
+  optedOutAt    DateTime? // R3 — checked by every send job
+  deletedAt     DateTime? // R5 — soft delete
+  notes         String?
+  pointsBalance Int       @default(0) // denormalized; ledger is source of truth
+  lastVisitAt   DateTime? // denormalized for segments
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  sales       Sale[]
+  refillRules RefillRule[]
+  pointsTx    PointsTransaction[]
+  messages    Message[]
+
+  @@unique([pharmacyId, phone])
+  @@index([pharmacyId, lastVisitAt])
+  @@index([pharmacyId, name])
+}
+
+enum Gender {
+  MALE
+  FEMALE
+}
+
+enum Tag {
+  CHRONIC
+  VIP
+}
+
+// R9 — pharmacy-local medicine formulary (دليل الأدوية). Still NOT a national
+// drug database: every row is created by this pharmacy, either explicitly on
+// the catalog page or auto-stubbed (name only) when a sale references a new
+// name. Catalog fields (price/company/stock/…) are optional so auto-stubs stay
+// valid and the pharmacy fills them in later.
+model ProductRef {
+  id          String   @id @default(cuid())
+  pharmacyId  String
+  pharmacy    Pharmacy @relation(fields: [pharmacyId], references: [id])
+  nameText    String // canonical, staff-created via autocomplete
+  aliases     String[] // merged variants
+  description String? // shown to staff when adding to an order
+  company     String? // manufacturer / distributor
+  category    String? // free-form, e.g. "مضاد حيوي", "مسكن", "شراب"
+  priceEgp    Decimal? @db.Decimal(10, 2) // default unit price (editable per sale)
+  stock       Int      @default(0) // units on hand; auto-decremented on sale
+  deletedAt   DateTime? // R5 — soft delete
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
+
+  saleItems   SaleItem[]
+  refillRules RefillRule[]
+
+  @@unique([pharmacyId, nameText])
+  @@index([pharmacyId])
+  @@index([pharmacyId, category])
+}
+
+model Sale {
+  id          String   @id @default(cuid())
+  pharmacyId  String
+  pharmacy    Pharmacy @relation(fields: [pharmacyId], references: [id])
+  customerId  String
+  customer    Customer @relation(fields: [customerId], references: [id])
+  loggedById  String
+  loggedBy    User     @relation(fields: [loggedById], references: [id])
+  totalEgp    Decimal  @db.Decimal(10, 2) // gross: auto-summed from items, staff may override
+  discountEgp Decimal  @default(0) @db.Decimal(10, 2)
+  notes       String? // order-level note
+  clientRef   String?  @unique // offline idempotency (uuid)
+  invoiceNo   Int? // sequential per pharmacy — assigned when the tax invoice is first issued
+  createdAt   DateTime @default(now())
+
+  items    SaleItem[]
+  pointsTx PointsTransaction[]
+
+  @@unique([pharmacyId, invoiceNo])
+  @@index([pharmacyId, createdAt])
+  @@index([customerId, createdAt])
+}
+
+model SaleItem {
+  id           String      @id @default(cuid())
+  saleId       String
+  sale         Sale        @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  nameText     String // as typed
+  productRefId String? // set when autocomplete matched/created
+  productRef   ProductRef? @relation(fields: [productRefId], references: [id])
+  qty          Int         @default(1)
+  unitPriceEgp Decimal     @default(0) @db.Decimal(10, 2) // price per unit at sale time
+  notes        String? // per-item note (e.g. dosage, substitution)
+
+  @@index([saleId])
+  @@index([productRefId])
+}
+
+// ---------- LOYALTY ----------
+model PointsTransaction {
+  id          String     @id @default(cuid())
+  pharmacyId  String // R7 — RLS + billing without joins
+  customerId  String
+  customer    Customer   @relation(fields: [customerId], references: [id])
+  saleId      String?
+  sale        Sale?      @relation(fields: [saleId], references: [id])
+  type        PointsType
+  points      Int // + earn / − redeem
+  createdById String? // R13 — who did manual ADJUST
+  createdAt   DateTime   @default(now())
+
+  @@index([customerId, createdAt])
+  @@index([pharmacyId, createdAt])
+}
+
+enum PointsType {
+  EARN
+  REDEEM
+  ADJUST
+}
+
+// ---------- REFILLS ----------
+model RefillRule {
+  id               String     @id @default(cuid())
+  customerId       String
+  customer         Customer   @relation(fields: [customerId], references: [id])
+  productRefId     String // R9 — exact match, never fuzzy text
+  productRef       ProductRef @relation(fields: [productRefId], references: [id])
+  cycleDays        Int
+  remindDaysBefore Int        @default(2)
+  autoSend         Boolean    @default(true)
+  isActive         Boolean    @default(true)
+  deletedAt        DateTime? // R5
+  nextDueAt        DateTime
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  reminders Reminder[]
+
+  @@index([nextDueAt, isActive])
+}
+
+model Reminder {
+  id              String         @id @default(cuid())
+  refillRuleId    String
+  refillRule      RefillRule     @relation(fields: [refillRuleId], references: [id])
+  dueAt           DateTime
+  status          ReminderStatus @default(PENDING)
+  convertedSaleId String?
+  createdAt       DateTime       @default(now())
+
+  messages Message[]
+
+  @@unique([refillRuleId, dueAt]) // R10 — dedup per cycle
+  @@index([status, dueAt])
+}
+
+enum ReminderStatus {
+  PENDING
+  SENT
+  CONVERTED
+  FAILED
+  SNOOZED
+  CANCELLED
+}
+
+// ---------- CAMPAIGNS & MESSAGING ----------
+model Campaign {
+  id             String         @id @default(cuid())
+  pharmacyId     String
+  pharmacy       Pharmacy       @relation(fields: [pharmacyId], references: [id])
+  name           String
+  segment        Json // {"tags":["CHRONIC"],"inactiveDays":30}
+  templateName   String // R4 — approved WA template only
+  templateParams Json?
+  templateSms    String // ≤2 Arabic segments
+  status         CampaignStatus @default(DRAFT)
+  scheduledAt    DateTime?
+  sentAt         DateTime?
+  recipientCount Int?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  messages Message[]
+
+  @@index([pharmacyId, status])
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  SENT
+  CANCELLED
+}
+
+model Message {
+  id             String        @id @default(cuid())
+  pharmacyId     String // R7
+  pharmacy       Pharmacy      @relation(fields: [pharmacyId], references: [id])
+  customerId     String
+  customer       Customer      @relation(fields: [customerId], references: [id])
+  campaignId     String?
+  campaign       Campaign?     @relation(fields: [campaignId], references: [id])
+  reminderId     String?
+  reminder       Reminder?     @relation(fields: [reminderId], references: [id])
+  channel        Channel
+  templateName   String? // R4 — required when channel=WHATSAPP
+  templateParams Json?
+  bodyText       String // rendered text (SMS body / WA rendered copy)
+  status         MessageStatus @default(QUEUED)
+  providerRef    String? // webhook correlation
+  costMicro      Int? // micro-EGP
+  sentAt         DateTime?
+  deliveredAt    DateTime?
+  readAt         DateTime?
+  failedAt       DateTime?
+  createdAt      DateTime      @default(now())
+
+  @@index([customerId, createdAt])
+  @@index([pharmacyId, createdAt])
+  @@index([providerRef])
+  @@index([campaignId, status])
+}
+
+enum Channel {
+  WHATSAPP
+  SMS
+}
+
+enum MessageStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  FALLBACK_TRIGGERED
+  SKIPPED_OPTOUT
+}
+
+// ---------- AUDIT ----------
+model AuditLog {
+  id         String   @id @default(cuid())
+  pharmacyId String
+  pharmacy   Pharmacy @relation(fields: [pharmacyId], references: [id])
+  userId     String
+  action     String // CUSTOMER_DELETE, POINTS_ADJUST, PLAN_CHANGE…
+  entity     String
+  entityId   String
+  diff       Json?
+  createdAt  DateTime @default(now())
+
+  @@index([pharmacyId, createdAt])
+}

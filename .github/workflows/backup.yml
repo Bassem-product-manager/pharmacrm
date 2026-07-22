@@ -1,0 +1,32 @@
+name: DB Backup
+
+# Nightly pg_dump of Neon → uploaded as a workflow artifact (free R2 alt).
+# Retention 14 days. Requires repo secret POSTGRES_URL (Neon connection string).
+# Manual runs allowed via the Actions tab.
+on:
+  schedule:
+    - cron: "0 2 * * *" # 02:00 UTC daily
+  workflow_dispatch:
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install postgresql-client-16 (match Neon's major version)
+        run: |
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16
+      - name: Dump database
+        env:
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+        run: |
+          test -n "$POSTGRES_URL" || { echo "::error::POSTGRES_URL secret not set"; exit 1; }
+          pg_dump --no-owner --no-privileges "$POSTGRES_URL" > "pharmacrm_$(date +%Y%m%d).sql"
+          gzip "pharmacrm_$(date +%Y%m%d).sql"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pharmacrm-backup-${{ github.run_id }}
+          path: "*.sql.gz"
+          retention-days: 14

@@ -1,0 +1,57 @@
+name: CI
+
+# Typecheck + build + full e2e on every PR and on pushes to main.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pharmacrm
+          POSTGRES_PASSWORD: pharmacrm
+          POSTGRES_DB: pharmacrm
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pharmacrm -d pharmacrm"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      POSTGRES_URL: postgresql://pharmacrm:pharmacrm@localhost:5432/pharmacrm
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: ci-test-secret
+      JWT_REFRESH_SECRET: ci-test-refresh-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Build shared package (workspace dependency)
+        run: npm run build -w @pharmacrm/shared
+      - name: Apply migrations (incl. RLS)
+        working-directory: apps/api
+        run: npx prisma migrate deploy --schema prisma/schema.prisma
+      - name: Generate Prisma client
+        working-directory: apps/api
+        run: npx prisma generate --schema prisma/schema.prisma
+      - name: Typecheck + build all workspaces
+        run: npx turbo run typecheck build
+      - name: Seed Arabic fixtures
+        working-directory: apps/api
+        run: npx prisma db seed
+      - name: E2E (live Postgres + Redis)
+        working-directory: apps/api
+        run: npx jest --config test/jest-e2e.json --runInBand --forceExit

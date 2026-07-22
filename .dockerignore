@@ -1,0 +1,10 @@
+# Never ship secrets or local build artifacts into the image
+**/.env
+**/.env.*
+**/node_modules
+**/dist
+**/.next
+**/.turbo
+**/coverage
+.git
+**/*.log

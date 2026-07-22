@@ -1,0 +1,26 @@
+{
+  "name": "pharmacrm",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "npm run build --workspace @pharmacrm/shared && dotenv -e .env -- npm run prisma:generate --workspace @pharmacrm/api && dotenv -e .env -- turbo run dev",
+    "db:setup": "dotenv -e .env -- npm run prisma:generate --workspace @pharmacrm/api && dotenv -e .env -- npx prisma migrate deploy --schema apps/api/prisma/schema.prisma",
+    "db:seed": "dotenv -e .env -- npm run prisma:seed --workspace @pharmacrm/api",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test"
+  },
+  "devDependencies": {
+    "dotenv-cli": "^8.0.0",
+    "turbo": "^2.0.6",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "packageManager": "npm@10.2.4"
+}
