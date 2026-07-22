@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "build": "nest build",
+    "postinstall": "cd ../.. && npm run build --workspace @pharmacrm/shared && npm run prisma:generate --workspace @pharmacrm/api",
     "start:dev": "nest start --watch",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
